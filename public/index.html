@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>منصة تواصل - Tawasul</title>
+  <meta name="description" content="تواصل - منصة تواصل بسيطة مع شات مباشر ومنشورات">
+  <link rel="icon" href="/favicon.ico" />
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    :root{
+      --primary:#1877f2;
+      --accent:#42b72a;
+      --bg:#f0f2f5;
+      --card:#fff;
+      --muted:#777;
+      --max-width:1000px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{font-family: "Segoe UI", Tahoma, Arial, sans-serif; background:var(--bg); color:#111; margin:0; display:flex; flex-direction:column; align-items:center}
+    header{width:100%; background:var(--primary); color:#fff; padding:14px 18px; box-shadow:0 2px 6px rgba(0,0,0,.08);}
+    .wrap{width:100%; max-width:var(--max-width); padding:18px}
+    .topbar{display:flex; justify-content:space-between; align-items:center; gap:10px}
+    h1{font-size:1.05rem; margin:0}
+    .user-info{display:flex; gap:8px; align-items:center}
+    .btn{background:var(--primary); color:#fff; border:0; padding:8px 12px; border-radius:6px; cursor:pointer}
+    .btn.secondary{background:var(--accent)}
+    .card{background:var(--card); border-radius:10px; padding:16px; margin-top:18px; box-shadow:0 1px 3px rgba(0,0,0,.06)}
+    .grid{display:grid; grid-template-columns:1fr 360px; gap:18px}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
+    input,textarea{width:100%; padding:10px; border:1px solid #e6e6e6; border-radius:8px; font-size:0.95rem}
+    textarea{resize:vertical}
+    .chat-box{height:320px; overflow:auto; padding:10px; border-radius:8px; background:#fafafa; border:1px solid #eee}
+    .msg{margin:6px 0; padding:8px 10px; border-radius:8px; display:inline-block; max-width:85%; word-wrap:break-word}
+    .msg.me{background:var(--primary); color:#fff; align-self:flex-end}
+    .msg.other{background:#e9eefc; color:#0b1b3a; align-self:flex-start}
+    .chat-list{display:flex; flex-direction:column}
+    .post{border-bottom:1px solid #f1f1f1; padding:10px 0}
+    .meta{color:var(--muted); font-size:0.85rem}
+    .status{font-size:0.85rem; color:#fff; opacity:0.9}
+    .hidden{display:none}
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap topbar">
+      <h1>تواصل — Tawasul</h1>
+      <div class="user-info">
+        <div id="user-display" aria-live="polite">غير مسجل</div>
+        <div id="conn-status" class="status">⏳ اتصال...</div>
+        <button id="logout-btn" class="btn hidden">تسجيل الخروج</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="auth-section" class="card">
+      <h2>تسجيل الدخول أو إنشاء حساب</h2>
+      <div style="display:flex; gap:10px; flex-wrap:wrap">
+        <input id="username" type="text" placeholder="اسم المستخدم" aria-label="اسم المستخدم" />
+        <input id="password" type="password" placeholder="كلمة المرور" aria-label="كلمة المرور" style="width:200px" />
+        <div style="display:flex; gap:8px">
+          <button id="login-btn" class="btn">تسجيل الدخول</button>
+          <button id="register-btn" class="btn secondary">إنشاء حساب</button>
+        </div>
+      </div>
+      <p id="auth-error" class="muted" role="alert" style="margin-top:10px;color:#c00"></p>
+    </section>
+
+    <section id="app-section" class="hidden">
+      <div class="grid">
+        <div>
+          <div class="card">
+            <h3>إنشاء منشور جديد</h3>
+            <textarea id="post-content" rows="3" placeholder="اكتب منشوراً..." aria-label="محتوى المنشور"></textarea>
+            <div style="display:flex; gap:8px; margin-top:8px">
+              <button id="post-btn" class="btn">نشر</button>
+              <div id="post-msg" class="muted" aria-live="polite"></div>
+            </div>
+          </div>
+
+          <div id="feed-card" class="card" style="margin-top:14px">
+            <h3>خلاصة الأخبار</h3>
+            <div id="posts-feed" aria-live="polite"></div>
+          </div>
+        </div>
+
+        <aside>
+          <div class="card">
+            <h3>المحادثة الفورية</h3>
+            <div id="chat-box" class="chat-box chat-list" role="log" aria-live="polite"></div>
+            <div style="display:flex; gap:8px; margin-top:10px">
+              <input id="chat-msg" type="text" placeholder="اكتب رسالتك واضغط Enter" aria-label="رسالة" />
+              <button id="send-btn" class="btn">إرسال</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const socket = io({ withCredentials: true });
+    let currentUser = '';
+
+    // عناصر
+    const authSection = document.getElementById('auth-section');
+    const appSection = document.getElementById('app-section');
+    const userDisplay = document.getElementById('user-display');
+    const connStatus = document.getElementById('conn-status');
+    const logoutBtn = document.getElementById('logout-btn');
+
+    const loginBtn = document.getElementById('login-btn');
+    const registerBtn = document.getElementById('register-btn');
+    const authError = document.getElementById('auth-error');
+
+    const postBtn = document.getElementById('post-btn');
+    const postContent = document.getElementById('post-content');
+    const postsFeed = document.getElementById('posts-feed');
+
+    const chatBox = document.getElementById('chat-box');
+    const chatMsg = document.getElementById('chat-msg');
+    const sendBtn = document.getElementById('send-btn');
+
+    // helpers
+    function escapeHtml(str){
+      return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+    }
+    function formatDate(iso){ try{ return new Date(iso).toLocaleString('ar-EG'); }catch(e){ return iso || ''; } }
+
+    // اتصال socket 状态
+    socket.on('connect', ()=>{ connStatus.textContent = '🟢 متصل'; connStatus.style.opacity=1; });
+    socket.on('disconnect', ()=>{ connStatus.textContent = '🔴 غير متصل'; connStatus.style.opacity=.9; });
+
+    socket.on('chat_history', history => { chatBox.innerHTML=''; history.forEach(appendMsg); });
+    socket.on('receive_message', msg => appendMsg(msg));
+
+    function appendMsg(msg){
+      const el = document.createElement('div');
+      const isMe = msg.sender === currentUser;
+      el.className = 'msg ' + (isMe? 'me' : 'other');
+      const time = msg.createdAt ? formatDate(msg.createdAt) : '';
+      el.innerHTML = `<strong>${isMe? 'أنت' : escapeHtml(msg.sender)}:</strong> ${escapeHtml(msg.text)} <div class="meta">${escapeHtml(time)}</div>`;
+      chatBox.appendChild(el);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    // التحقق من الجلسة الحالية
+    async function checkAuth(){
+      try{
+        const res = await fetch('/api/me', { credentials: 'include' });
+        if(!res.ok) return;
+        const data = await res.json();
+        if(data.loggedIn) setupApp(data.username);
+      }catch(e){ console.warn('auth check failed', e); }
+    }
+
+    function setLoggedIn(username){
+      currentUser = username;
+      userDisplay.textContent = 'أهلاً، ' + username;
+      logoutBtn.classList.remove('hidden');
+      authSection.classList.add('hidden');
+      appSection.classList.remove('hidden');
+    }
+
+    function logoutUI(){ currentUser=''; userDisplay.textContent='غير مسجل'; logoutBtn.classList.add('hidden'); authSection.classList.remove('hidden'); appSection.classList.add('hidden'); }
+
+    async function setupApp(username){ setLoggedIn(username); loadPosts(); }
+
+    // auth actions
+    async function register(){
+      authError.textContent='';
+      const u = document.getElementById('username').value.trim();
+      const p = document.getElementById('password').value;
+      if(!u||!p){ authError.textContent='املأ اسم المستخدم وكلمة المرور'; return; }
+      const res = await fetch('/api/register', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p}) });
+      const data = await res.json();
+      if(res.ok && data.success) setupApp(data.username);
+      else authError.textContent = data.error || 'حدث خطأ أثناء التسجيل';
+    }
+    async function login(){
+      authError.textContent='';
+      const u = document.getElementById('username').value.trim();
+      const p = document.getElementById('password').value;
+      if(!u||!p){ authError.textContent='املأ اسم المستخدم وكلمة المرور'; return; }
+      const res = await fetch('/api/login', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p}) });
+      const data = await res.json();
+      if(res.ok && data.success) setupApp(data.username);
+      else authError.textContent = data.error || 'فشل تسجيل الدخول';
+    }
+
+    async function logout(){
+      try{ await fetch('/api/logout', { method:'POST', credentials:'include' }); }catch(e){}
+      logoutUI();
+    }
+
+    // posts
+    async function createPost(){
+      const content = postContent.value.trim();
+      if(!content) return;
+      const res = await fetch('/api/posts', { method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content}) });
+      if(res.ok){ postContent.value=''; loadPosts(); }
+      else{ const err = await res.json().catch(()=>({})); alert(err.error||'خطأ أثناء نشر المنشور'); }
+    }
+    async function loadPosts(){
+      const res = await fetch('/api/posts', { credentials:'include' });
+      if(!res.ok) return;
+      const posts = await res.json();
+      postsFeed.innerHTML = posts.map(p=>`<div class="post"><div><strong>${escapeHtml(p.author)}</strong> <span class="meta">${formatDate(p.createdAt)}</span></div><div>${escapeHtml(p.content)}</div></div>`).join('');
+    }
+
+    // chat send
+    async function sendMessage(){
+      const text = chatMsg.value.trim(); if(!text) return; socket.emit('send_message',{text}); chatMsg.value='';
+    }
+
+    // event listeners
+    registerBtn.addEventListener('click', register);
+    loginBtn.addEventListener('click', login);
+    postBtn.addEventListener('click', createPost);
+    sendBtn.addEventListener('click', sendMessage);
+    logoutBtn.addEventListener('click', logout);
+
+    chatMsg.addEventListener('keyup', (e)=>{ if(e.key==='Enter'){ sendMessage(); } });
+
+    // بداية
+    checkAuth();
+  </script>
+</body>
+</html>
