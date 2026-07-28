@@ -1,0 +1,187 @@
+require('dotenv').config();
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const path = require('path');
+const mongoose = require('mongoose');
+const MongoStore = require('connect-mongo'); // npm i connect-mongo
+const helmet = require('helmet');
+const cors = require('cors');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: process.env.CLIENT_ORIGIN || '*',
+    credentials: true
+  }
+});
+
+// إعدادات وسيطة
+app.use(helmet());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(cors({
+  origin: process.env.CLIENT_ORIGIN || '*',
+  credentials: true
+}));
+
+// اقرأ متغيرات البيئة
+const MONGO_URI = process.env.MONGO_URI || '';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'tawasul_online_secret_key';
+
+if (!MONGO_URI) {
+  console.error('❌ MONGO_URI غير معرف. ضع رابط MongoDB في متغير البيئة MONGO_URI');
+  process.exit(1);
+}
+
+// اتصال mongoose
+mongoose.connect(MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+  .then(() => console.log('✅ تم الاتصال بقاعدة البيانات السحابية بنجاح'))
+  .catch(err => {
+    console.error('❌ خطأ في الاتصال بقاعدة البيانات:', err);
+    process.exit(1);
+  });
+
+// إذا كنت خلف reverse proxy مثل Nginx أو منصة سحابية، فكّر بتفعيل trust proxy
+if (process.env.TRUST_PROXY === '1') {
+  app.set('trust proxy', 1);
+}
+
+// جلسة مع MongoStore (مناسب للإنتاج)
+const sessionMiddleware = session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  store: MongoStore.create({ mongoUrl: MONGO_URI }),
+  cookie: {
+    secure: process.env.NODE_ENV === 'production', // يتطلب HTTPS في الإنتاج
+    sameSite: 'lax',
+    maxAge: 1000 * 60 * 60 * 24 * 7 // 7 أيام
+  }
+});
+app.use(sessionMiddleware);
+
+// شارك الجلسة مع socket.io
+io.use((socket, next) => {
+  sessionMiddleware(socket.request, {}, next);
+});
+
+// نماذج Mongoose - استخدم Date للحقول الزمنية
+const User = mongoose.model('User', new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  password: { type: String, required: true }
+}));
+
+const Post = mongoose.model('Post', new mongoose.Schema({
+  author: String,
+  content: String,
+  createdAt: { type: Date, default: Date.now }
+}));
+
+const Message = mongoose.model('Message', new mongoose.Schema({
+  sender: String,
+  text: String,
+  createdAt: { type: Date, default: Date.now }
+}));
+
+// --- مسارات الحسابات ---
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'أدخل البيانات كاملة' });
+  if (typeof username !== 'string' || typeof password !== 'string') return res.status(400).json({ error: 'نوع بيانات غير صحيح' });
+  if (username.length > 50 || password.length > 200) return res.status(400).json({ error: 'حجم البيانات أكبر من اللازم' });
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = await User.create({ username, password: hashedPassword });
+    req.session.username = newUser.username;
+    res.json({ success: true, username: newUser.username });
+  } catch (e) {
+    if (e.code === 11000) {
+      return res.status(400).json({ error: 'اسم المستخدم مسجّل مسبقاً' });
+    }
+    console.error('Register error:', e);
+    res.status(500).json({ error: 'حدث خطأ داخلي' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'أدخل البيانات كاملة' });
+
+  try {
+    const user = await User.findOne({ username });
+    if (!user || !(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+    }
+    req.session.username = user.username;
+    res.json({ success: true, username: user.username });
+  } catch (e) {
+    console.error('Login error:', e);
+    res.status(500).json({ error: 'حدث خطأ داخلي' });
+  }
+});
+
+app.get('/api/me', (req, res) => {
+  res.json({ loggedIn: !!req.session.username, username: req.session.username || '' });
+});
+
+// --- مسارات المنشورات ---
+app.post('/api/posts', async (req, res) => {
+  try {
+    if (!req.session.username) return res.status(401).json({ error: 'غير مصرح' });
+    const content = (req.body.content || '').toString().trim();
+    if (!content) return res.status(400).json({ error: 'المحتوى فارغ' });
+    const post = await Post.create({ author: req.session.username, content });
+    res.json(post);
+  } catch (e) {
+    console.error('Create post error:', e);
+    res.status(500).json({ error: 'حدث خطأ داخلي' });
+  }
+});
+
+app.get('/api/posts', async (req, res) => {
+  try {
+    const posts = await Post.find().sort({ createdAt: -1 }).limit(100);
+    res.json(posts);
+  } catch (e) {
+    console.error('Get posts error:', e);
+    res.status(500).json({ error: 'حدث خطأ داخلي' });
+  }
+});
+
+// --- الشات عبر Socket.io ---
+io.on('connection', async (socket) => {
+  try {
+    const username = socket.request.session && socket.request.session.username;
+    if (!username) {
+      return socket.disconnect(true);
+    }
+
+    const history = await Message.find().sort({ createdAt: -1 }).limit(50);
+    socket.emit('chat_history', history.reverse());
+
+    socket.on('send_message', async (data) => {
+      try {
+        const text = (data && data.text) ? data.text.toString().trim() : '';
+        if (!text) return;
+        const msg = await Message.create({ sender: username, text });
+        io.emit('receive_message', msg);
+      } catch (err) {
+        console.error('Socket send_message error:', err);
+      }
+    });
+  } catch (err) {
+    console.error('Socket connection error:', err);
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 السيرفر يعمل على المنفذ: ${PORT}`));
