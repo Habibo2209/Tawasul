@@ -1,0 +1,104 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const bcrypt = require('bcryptjs');
+const session = require('express-session');
+const path = require('path');
+const mongoose = require('mongoose');
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
+// إعدادات السيرفر
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(session({
+  secret: 'tawasul_online_secret_key',
+  resave: false,
+  saveUninitialized: true
+}));
+
+// الاتصال بقاعدة البيانات أونلاين
+// استبدل الرابط أدناه برابط MongoDB Atlas الخاص بك
+const MONGO_URI = process.env.MONGO_URI || "ضع_رابط_MONGODB_هنا";
+
+mongoose.connect(MONGO_URI)
+  .then(() => console.log('✅ تم الاتصال بقاعدة البيانات السحابية بنجاح'))
+  .catch(err => console.error('❌ خطأ في الاتصال بقاعدة البيانات:', err));
+
+// تعريف شكل البيانات (Schemas)
+const User = mongoose.model('User', new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  password: { type: String, required: true }
+}));
+
+const Post = mongoose.model('Post', new mongoose.Schema({
+  author: String,
+  content: String,
+  createdAt: { type: String, default: () => new Date().toLocaleTimeString('ar-EG') }
+}));
+
+const Message = mongoose.model('Message', new mongoose.Schema({
+  sender: String,
+  text: String,
+  time: { type: String, default: () => new Date().toLocaleTimeString('ar-EG') }
+}));
+
+// === مسارات الحسابات ===
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'أدخل البيانات كاملة' });
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = await User.create({ username, password: hashedPassword });
+    req.session.username = newUser.username;
+    res.json({ success: true, username: newUser.username });
+  } catch (e) {
+    res.status(400).json({ error: 'اسم المستخدم مسجّل مسبقاً' });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
+  const user = await User.findOne({ username });
+
+  if (!user || !(await bcrypt.compare(password, user.password))) {
+    return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });
+  }
+
+  req.session.username = user.username;
+  res.json({ success: true, username: user.username });
+});
+
+app.get('/api/me', (req, res) => {
+  res.json({ loggedIn: !!req.session.username, username: req.session.username || '' });
+});
+
+// === مسارات المنشورات ===
+app.post('/api/posts', async (req, res) => {
+  if (!req.session.username) return res.status(401).json({ error: 'غير مصرح' });
+  const post = await Post.create({ author: req.session.username, content: req.body.content });
+  res.json(post);
+});
+
+app.get('/api/posts', async (req, res) => {
+  const posts = await Post.find().sort({ _id: -1 });
+  res.json(posts);
+});
+
+// === الشات المباشر عبر Socket.io ===
+io.on('connection', async (socket) => {
+  const history = await Message.find().limit(50);
+  socket.emit('chat_history', history);
+
+  socket.on('send_message', async (data) => {
+    const msg = await Message.create({ sender: data.sender, text: data.text });
+    io.emit('receive_message', msg);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`🚀 السيرفر يعمل على المنفذ: ${PORT}`));
