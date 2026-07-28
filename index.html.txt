@@ -16,11 +16,12 @@
     button:hover { background-color: #166fe5; }
     .hidden { display: none; }
     .chat-box { height: 300px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin-bottom: 10px; border-radius: 6px; background: #fafafa; }
-    .msg { margin-bottom: 8px; padding: 6px 10px; border-radius: 6px; background: #e4e6eb; display: inline-block; clear: both; }
+    .msg { margin-bottom: 8px; padding: 6px 10px; border-radius: 6px; background: #e4e6eb; display: inline-block; clear: both; max-width: 80%; word-wrap: break-word; }
     .msg.me { background: #0084ff; color: white; float: left; }
+    .msg.other { float: right; }
     .post { border-bottom: 1px solid #eee; padding: 10px 0; }
     .post-author { font-weight: bold; color: #1877f2; }
-    .post-time { font-size: 0.8em; color: #777; }
+    .post-time { font-size: 0.8em; color: #777; margin-right: 8px; }
   </style>
 </head>
 <body>
@@ -36,8 +37,8 @@
       <h2>تسجيل الدخول / إنشاء حساب جديد</h2>
       <input type="text" id="username" placeholder="اسم المستخدم" />
       <input type="password" id="password" placeholder="كلمة المرور" />
-      <button onclick="login()">تسجيل الدخول</button>
-      <button onclick="register()" style="background-color: #42b72a; margin-top: 5px;">إنشاء حساب جديد</button>
+      <button id="login-btn" onclick="login()">تسجيل الدخول</button>
+      <button id="register-btn" onclick="register()" style="background-color: #42b72a; margin-top: 5px;">إنشاء حساب جديد</button>
       <p id="auth-error" style="color: red; margin-top: 10px;"></p>
     </div>
 
@@ -55,7 +56,7 @@
         <h3>المحادثة الفورية المباشرة 💬</h3>
         <div id="chat-box" class="chat-box"></div>
         <div style="display: flex; gap: 5px;">
-          <input type="text" id="chat-msg" placeholder="اكتب رسالتك لصديقك..." style="margin:0;" />
+          <input type="text" id="chat-msg" placeholder="اكتب رسالتك..." style="margin:0;" />
           <button onclick="sendMessage()" style="width: 100px; margin:0;">إرسال</button>
         </div>
       </div>
@@ -69,12 +70,24 @@
   </div>
 
   <script>
-    const socket = io();
+    // افتح socket مع السماح بتمرير الكوكيز (لـ session)
+    const socket = io({ withCredentials: true });
     let currentUser = '';
 
-    // التحقق عند فتح الصفحة
+    // helper لتنسيق التاريخ (ISO → عرض عربي)
+    function formatDate(iso) {
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString('ar-EG');
+      } catch (e) {
+        return iso;
+      }
+    }
+
+    // التحقق عند فتح الصفحة (أرسل الكوكيز)
     async function checkAuth() {
-      const res = await fetch('/api/me');
+      const res = await fetch('/api/me', { credentials: 'include' });
+      if (!res.ok) return;
       const data = await res.json();
       if (data.loggedIn) {
         setupApp(data.username);
@@ -90,60 +103,79 @@
     }
 
     async function register() {
-      const u = document.getElementById('username').value;
+      const u = document.getElementById('username').value.trim();
       const p = document.getElementById('password').value;
       const res = await fetch('/api/register', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: u, password: p })
       });
       const data = await res.json();
-      if (data.success) setupApp(data.username);
-      else document.getElementById('auth-error').innerText = data.error;
+      if (res.ok && data.success) {
+        setupApp(data.username);
+      } else {
+        document.getElementById('auth-error').innerText = data.error || 'خطأ أثناء التسجيل';
+      }
     }
 
     async function login() {
-      const u = document.getElementById('username').value;
+      const u = document.getElementById('username').value.trim();
       const p = document.getElementById('password').value;
       const res = await fetch('/api/login', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: u, password: p })
       });
       const data = await res.json();
-      if (data.success) setupApp(data.username);
-      else document.getElementById('auth-error').innerText = data.error;
+      if (res.ok && data.success) {
+        setupApp(data.username);
+      } else {
+        document.getElementById('auth-error').innerText = data.error || 'خطأ أثناء الدخول';
+      }
     }
 
     async function createPost() {
-      const content = document.getElementById('post-content').value;
+      const content = document.getElementById('post-content').value.trim();
       if (!content) return;
-      await fetch('/api/posts', {
+      const res = await fetch('/api/posts', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content })
       });
-      document.getElementById('post-content').value = '';
-      loadPosts();
+      if (res.ok) {
+        document.getElementById('post-content').value = '';
+        loadPosts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || 'خطأ عند إنشاء المنشور');
+      }
     }
 
     async function loadPosts() {
-      const res = await fetch('/api/posts');
+      const res = await fetch('/api/posts', { credentials: 'include' });
+      if (!res.ok) return;
       const posts = await res.json();
       const feed = document.getElementById('posts-feed');
-      feed.innerHTML = posts.map(p => `
-        <div class="post">
-          <div class="post-author">${p.author} <span class="post-time">${p.createdAt}</span></div>
-          <p>${p.content}</p>
-        </div>
-      `).join('');
+      feed.innerHTML = posts.map(p => {
+        const time = p.createdAt ? formatDate(p.createdAt) : '';
+        return `
+          <div class="post">
+            <div><span class="post-author">${escapeHtml(p.author || '')}</span> <span class="post-time">${time}</span></div>
+            <p>${escapeHtml(p.content || '')}</p>
+          </div>
+        `;
+      }).join('');
     }
 
-    // === مراسلة الشات عبر Socket.io ===
+    // إرسال رسالة: لا ترسل اسم المرسل من العميل (تعتمد الجلسة على الخادم)
     function sendMessage() {
       const input = document.getElementById('chat-msg');
-      if (!input.value) return;
-      socket.emit('send_message', { sender: currentUser, text: input.value });
+      const text = input.value.trim();
+      if (!text) return;
+      socket.emit('send_message', { text });
       input.value = '';
     }
 
@@ -161,10 +193,21 @@
       const box = document.getElementById('chat-box');
       const div = document.createElement('div');
       const isMe = msg.sender === currentUser;
-      div.className = `msg ${isMe ? 'me' : ''}`;
-      div.innerHTML = `<strong>${isMe ? 'أنت' : msg.sender}:</strong> ${msg.text}`;
+      div.className = 'msg ' + (isMe ? 'me' : 'other');
+      const time = msg.createdAt ? formatDate(msg.createdAt) : (msg.time || '');
+      div.innerHTML = `<strong>${isMe ? 'أنت' : escapeHtml(msg.sender || 'مجهول')}:</strong> ${escapeHtml(msg.text || '')} <div class="post-time">${escapeHtml(time)}</div>`;
       box.appendChild(div);
       box.scrollTop = box.scrollHeight;
+    }
+
+    // Basic escaping to reduce XSS when inserting text into HTML
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
     }
 
     checkAuth();
